@@ -201,7 +201,11 @@ const DETECT_FN = `(function(){
 })()`;
 
 async function detectKind(cdp) {
-  const all = await cdp.evaluateAll(DETECT_FN);
+  const kid = await cdp
+    .evaluate(`((document.getElementById('iframe')||{}).src||'').match(/knowledgeid=(\\d+)/)?.[1] || ''`)
+    .catch(() => '');
+  const scope = await cdp.subtreeCtxIds(kid).catch(() => null);
+  const all = await cdp.evaluateAll(DETECT_FN, scope ? { onlyContexts: scope } : {});
   let hasQ = false, hasV = false;
   for (const r of all) {
     if (!r.value) continue;

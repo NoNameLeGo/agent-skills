@@ -109,6 +109,7 @@ class CDP {
   async evaluateAll(expr, opts = {}) {
     let ids = [...new Set([...this.ctxByFrame.values()].filter(v => v != null))];
     if (opts.onlyContext != null) ids = [opts.onlyContext];
+    else if (Array.isArray(opts.onlyContexts) && opts.onlyContexts.length) ids = opts.onlyContexts;
     const out = [];
     for (const id of ids) {
       try {
@@ -124,6 +125,40 @@ class CDP {
   async navigate(url, waitMs = 3000) {
     await this.send('Page.navigate', { url });
     await sleep(waitMs);
+  }
+
+  /**
+   * 返回「当前章节」那棵 iframe 子树里的所有 execution context id。
+   *
+   * 为什么需要：切节时旧的 knowledge/cards iframe 有时不会被销毁，仍作为独立的
+   * execution context 存在。全量 evaluateAll 会把上一节残留的题目也算进来，
+   * 导致每个节点都被误判成 questions、然后在错误的上下文里填答一败涂地。
+   *
+   * @param {string} kid 当前 knowledgeid
+   */
+  async subtreeCtxIds(kid) {
+    let tree;
+    try { tree = await this.send('Page.getFrameTree', {}, 8000); } catch { return null; }
+    const nodes = [];
+    const walk = (n, parent, depth) => {
+      const f = { id: n.frame.id, url: n.frame.url || '', parent, depth };
+      nodes.push(f);
+      for (const c of n.childFrames || []) walk(c, f.id, depth + 1);
+    };
+    walk(tree.frameTree, null, 0);
+    if (!kid) return null;
+    const root = nodes.find(n => n.url.includes('knowledgeid=' + kid));
+    if (!root) return null;
+    const ids = new Set([root.id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const n of nodes) {
+        if (!ids.has(n.id) && n.parent && ids.has(n.parent)) { ids.add(n.id); grew = true; }
+      }
+    }
+    const ctxIds = [...ids].map(fid => this.ctxByFrame.get(fid)).filter(v => v != null);
+    return ctxIds.length ? ctxIds : null;
   }
 
   /** 断言在某个 URL 片段上（如 work/dowork），用于防止填错页面 */

@@ -147,7 +147,13 @@ function kindOf(url, title = '') {
 
 /** 在所有上下文里跑抽取，返回题目最多的那一份 */
 async function extractQuestions(cdp, log) {
-  const all = await cdp.evaluateAll(EXTRACT_SRC);
+  // 只扫「当前章节」那棵 iframe 子树，避免把上一节残留 iframe 里的题目也算进来
+  const kid = await cdp
+    .evaluate(`((document.getElementById('iframe')||{}).src||'').match(/knowledgeid=(\\d+)/)?.[1] || ''`)
+    .catch(() => '');
+  const scope = await cdp.subtreeCtxIds(kid).catch(() => null);
+  if (log && kid) log.info(`当前章节 kid=${kid}，限定上下文 ${scope ? scope.join(',') : '（全部）'}`);
+  const all = await cdp.evaluateAll(EXTRACT_SRC, scope ? { onlyContexts: scope } : {});
   let best = { questions: [], url: '', title: '', bodyHead: '', hasSubmit: false, ctx: null };
   const stat = [];
   for (const r of all) {
