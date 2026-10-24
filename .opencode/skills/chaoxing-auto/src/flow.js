@@ -7,6 +7,10 @@ const { solve } = require('./answer');
 const { applyAnswers, saveDraft, submitNow, verify, relocalCtx } = require('./fill');
 const { listChapters, watchCurrent, probe } = require('./study');
 const { sleep, saveJson } = require('./util');
+const { randInt } = require('./util');
+
+/** 当前章节 knowledgeid（取自外层 #iframe 的 src） */
+const KID_EXPR = "((document.getElementById('iframe')||{}).src||'').match(/knowledgeid=(\\d+)/)?.[1] || ''";
 
 /** 处理当前页面上的题（作业页 / 章节测验页通用） */
 async function handleQuestions(cdp, cfg, log, { autoSubmit = false, tag = 'quiz', presetAnswers = null } = {}) {
@@ -21,7 +25,7 @@ async function handleQuestions(cdp, cfg, log, { autoSubmit = false, tag = 'quiz'
 
   // 硬闸：选择题/判断题没解析到选项时，绝不能把「没有选项的题干」丢给模型让它瞎猜字母
   const noOpts = page.questions.filter(
-    q => (q.qtype === 'single' || q.qtype === 'multi' || q.qtype === 'judge') && (q.options || []).length < 2
+    q => (q.qtype === 'single' || q.qtype === 'multi' || q.qtype === 'judge') && (q.fillable || 0) < 2
   );
   if (noOpts.length) {
     log.warn(`${noOpts.length} 题没解析到选项（qid=${noOpts.map(q => q.qid).join(',')}），这些题不送模型、不猜`);
@@ -128,7 +132,13 @@ async function runCourse(cdp, cfg, log, { maxChapters = 200, skipDone = true, fr
     await sleep(3500);
 
     const kind = await detectKind(cdp);
-    log.info(`本节类型：${kind}`);
+    // 已批阅页（selectWorkQuestionYiPiYue）= 这题之前已经交过，没有可点击的选项，跳过。
+    // 注意：它在嵌套 iframe 里，只能扫当前章节子树的 URL 才看得到。
+    const scopeIds = await cdp.subtreeCtxIds(await cdp.evaluate(KID_EXPR).catch(() => '')).catch(() => null);
+    const urls = await cdp.evaluateAll('location.href', scopeIds ? { onlyContexts: scopeIds } : {}).catch(() => []);
+    const graded = urls.some(x => /selectWorkQuestion/i.test(String(x.value || '')));
+    log.info(`本节类型：${kind}${graded ? '（已批阅，跳过）' : ''}`);
+    if (graded) { skipped++; await sleep(1500); continue; }
 
     if (kind === 'questions') {
       const r = await handleQuestions(cdp, cfg, log, {
@@ -201,9 +211,7 @@ const DETECT_FN = `(function(){
 })()`;
 
 async function detectKind(cdp) {
-  const kid = await cdp
-    .evaluate(`((document.getElementById('iframe')||{}).src||'').match(/knowledgeid=(\\d+)/)?.[1] || ''`)
-    .catch(() => '');
+  const kid = await cdp.evaluate(KID_EXPR).catch(() => '');
   const scope = await cdp.subtreeCtxIds(kid).catch(() => null);
   const all = await cdp.evaluateAll(DETECT_FN, scope ? { onlyContexts: scope } : {});
   let hasQ = false, hasV = false;
@@ -212,7 +220,12 @@ async function detectKind(cdp) {
     if (r.value.hasQ) hasQ = true;
     if (r.value.hasV) hasV = true;
   }
-  if (hasQ) return 'questions';
+  if (hasQ) {
+    // 只有题目真的长在 work 页里才算测验；知识点/阅读节的卡片里也可能残留在别的 #question 节点
+    const urls = await cdp.evaluateAll('location.href', scope ? { onlyContexts: scope } : {}).catch(() => []);
+    const isWork = urls.some(u => /\/work\/(doHomeWorkNew|selectWorkQuestion)/i.test(String(u.value || '')));
+    return isWork ? 'questions' : (hasV ? 'video' : 'other');
+  }
   if (hasV) return 'video';
   return 'other';
 }

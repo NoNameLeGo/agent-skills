@@ -111,12 +111,15 @@ const EXTRACT_SRC = `(() => {
     node.querySelectorAll('textarea[id^="answerEditor"]').forEach(t => { if (!editors.includes(t.id)) editors.push(t.id); });
     if (editors.length) qtype = 'fill';
 
+    // rawText 反解出来的选项不能点击（已批阅页），只有真实 DOM 选项才算「可填答」
+    const fillable = options.filter(o => o.from !== 'rawText').length;
     const typeMap = { '0': 'single', '1': 'multi', '3': 'judge', fill: 'fill' };
     res.questions.push({
       qid,
       qtype: typeMap[String(qtype)] || 'single',
       stem,
       options,
+      fillable,
       editors,
       blanks: editors.length || 0,
       rawText: txt(node).slice(0, 1200),
