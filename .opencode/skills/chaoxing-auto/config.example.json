@@ -1,0 +1,110 @@
+{
+  "_readme": "复制为 config.json 后填写。config.json 已加入 .gitignore，不会入库。",
+  "cdpPort": 9223,
+  "edge": {
+    "exe": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "profileDir": "D:\\Vibe-Coding\\chaoxing-auto\\.cache\\edge-profile",
+    "muteAudio": true,
+    "headless": false
+  },
+  "study": {
+    "_readme": "刷课：视频固定 1 倍速 + 浏览器级静音；章节测验做完即提交并继续；作业只暂存不提交",
+    "playbackRate": 1,
+    "muteVideoElement": true,
+    "chapterQuiz": {
+      "autoSubmit": true
+    },
+    "work": {
+      "autoSubmit": false
+    },
+    "exam": {
+      "enabled": false,
+      "autoSubmit": false
+    },
+    "maxMinutesPerPage": 45,
+    "maxConsecutiveStalls": 3,
+    "readSeconds": 0
+  },
+  "humanize": {
+    "_readme": "答题间隔随机区间（毫秒），模拟人工",
+    "minGap": 3000,
+    "maxGap": 12000
+  },
+  "answer": {
+    "_readme": "四级降级链，按数组顺序尝试；某级没解出来的题自动交给下一级",
+    "chain": [
+      "freeai",
+      "webai",
+      "websearch",
+      "localllm"
+    ],
+    "freeai": {
+      "_readme": "第一级：免费 AI（OpenAI 兼容接口）。填 baseURL + apiKey + model 即可。留空则自动跳过本级。",
+      "enabled": true,
+      "baseURL": "https://api.example.com/v1",
+      "apiKey": "sk-REPLACE_ME",
+      "model": "your-model-name",
+      "temperature": 0.1,
+      "timeoutMs": 120000,
+      "batchSize": 5,
+      "fallbacks": [
+        {
+          "baseURL": "https://api.fallback.com/v1",
+          "apiKey": "sk-REPLACE_ME_TOO",
+          "model": "fallback-model"
+        }
+      ]
+    },
+    "webai": {
+      "_readme": "第二级：网页 AI（用已登录的网页版大模型）。首次需在该 Edge 窗口里手动登录一次。只在同一个对话里连续提问，不新开会话。",
+      "enabled": true,
+      "sites": [
+        {
+          "name": "qianwen",
+          "url": "https://www.tongyi.com/qianwen/",
+          "inputSelector": "textarea, div[contenteditable='true']",
+          "sendSelector": "button[type='submit'], div[class*='send']",
+          "replySelector": "div[class*='markdown'], div[class*='answer']",
+          "readySelector": "textarea, div[contenteditable='true']"
+        },
+        {
+          "name": "doubao",
+          "url": "https://www.doubao.com/chat/",
+          "inputSelector": "textarea, div[contenteditable='true']",
+          "sendSelector": "button[type='submit'], div[class*='send-btn']",
+          "replySelector": "div[class*='markdown'], div[class*='message-content']",
+          "readySelector": "textarea, div[contenteditable='true']"
+        },
+        {
+          "name": "deepseek-web",
+          "_note": "会污染对话历史，默认不启用；启用后只在同一个对话里连续问，不新开",
+          "url": "https://chat.deepseek.com/",
+          "inputSelector": "textarea#chat-input, textarea",
+          "sendSelector": "div[role='button'][aria-disabled='false'], button[type='submit']",
+          "replySelector": ".ds-markdown, [class*='markdown']",
+          "readySelector": "textarea#chat-input, textarea",
+          "enabled": false
+        }
+      ],
+      "timeoutMs": 180000
+    },
+    "websearch": {
+      "_readme": "第三级：不带 key 的网页搜索（必应），从结果摘要里提取答案。准确率最低，只作兜底。",
+      "enabled": true,
+      "engine": "bing",
+      "topN": 5,
+      "timeoutMs": 20000
+    },
+    "localllm": {
+      "_readme": "第四级：本地 LLM（Ollama / LM Studio 等 OpenAI 兼容服务）。没装模型则跳过。",
+      "enabled": true,
+      "baseURL": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "model": "qwen2.5:7b",
+      "temperature": 0.1,
+      "timeoutMs": 120000,
+      "batchSize": 4
+    },
+    "crossCheck": true
+  }
+}
