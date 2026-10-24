@@ -4,7 +4,7 @@
  */
 const { extractQuestions, sanityCheck } = require('./extract');
 const { solve } = require('./answer');
-const { applyAnswers, saveDraft, submitNow, verify } = require('./fill');
+const { applyAnswers, saveDraft, submitNow, verify, relocalCtx } = require('./fill');
 const { listChapters, watchCurrent, probe } = require('./study');
 const { sleep, saveJson } = require('./util');
 
@@ -54,15 +54,24 @@ async function handleQuestions(cdp, cfg, log, { autoSubmit = false, tag = 'quiz'
   if (!solvedN) { log.warn('一道都没解出来，不填答，直接返回'); return { ok: false, reason: 'no-answers', page }; }
 
   const bad = await applyAnswers(cdp, page.questions, answers, cfg, log, page.ctx);
+  // 视频播完/提交前页面会重渲染，提交与复核前重新定位题目所在上下文
+  const ctx2 = (await relocalCtx(cdp, page.questions[0].qid).catch(() => null)) || page.ctx;
   if (bad) log.warn(`填答阶段有 ${bad} 处异常，继续走复核`);
 
+  // 安全闸：有题缺选项 / 填答有异常 → 一律不提交，只暂存（宁可少交，也不交白卷）
+  if (noOpts.length || bad > 0) {
+    log.err(`填答不完整（缺选项 ${noOpts.length} 题 / 异常 ${bad} 处），本轮不提交，只暂存`);
+    await saveDraft(cdp, log, ctx2);
+    return { ok: false, reason: 'fill-incomplete', page, answers };
+  }
+
   if (autoSubmit) {
-    await submitNow(cdp, log, page.ctx);
+    await submitNow(cdp, log, ctx2);
   } else {
-    await saveDraft(cdp, log, page.ctx);
+    await saveDraft(cdp, log, ctx2);
   }
   await sleep(1500);
-  const vbad = await verify(cdp, page.questions, answers, log, page.ctx).catch(e => { log.warn('复核失败: ' + e.message); return -1; });
+  const vbad = await verify(cdp, page.questions, answers, log, ctx2).catch(e => { log.warn('复核失败: ' + e.message); return -1; });
   return { ok: true, page, answers, unsolved, autoSubmit, verifyBad: vbad };
 }
 

@@ -118,6 +118,21 @@ function buildPlan(questions, answers) {
   return { choice, fill, skipped };
 }
 
+/**
+ * 页面在播放结束后会自动重渲染 iframe，之前抓到的 contextId 会失效。
+ * 这里按「哪个上下文里存在这道题」重新定位，返回新的 contextId。
+ */
+async function relocalCtx(cdp, qid) {
+  const expr = `!!document.getElementById('question${qid}')`;
+  const rs = await cdp.evaluateAll(expr, { timeoutMs: 8000 }).catch(() => []);
+  const hit = rs.find(r => r.value === true);
+  if (hit) return hit.contextId;
+  // 没有具体 qid 时，退化为「任意有题目的上下文」
+  const rs2 = await cdp.evaluateAll(`document.querySelectorAll('[id^="question"]').length > 0`, { timeoutMs: 8000 }).catch(() => []);
+  const hit2 = rs2.find(r => r.value === true);
+  return hit2 ? hit2.contextId : null;
+}
+
 async function applyAnswers(cdp, questions, answers, cfg, log, ctxId) {
   const { choice, fill, skipped } = buildPlan(questions, answers);
   const g = cfg.humanize || { minGap: 3000, maxGap: 12000 };
@@ -125,15 +140,28 @@ async function applyAnswers(cdp, questions, answers, cfg, log, ctxId) {
   log.info(`填答计划：选择/判断 ${choice.length} 题，填空 ${fill.length} 题`);
 
   let bad = 0, clicks = 0;
+  let ctx = ctxId;
   // 一题一次 evaluate + Node 侧随机间隔（3–12s），既像人，也不会因为整页重渲染卡死
   for (let i = 0; i < choice.length; i++) {
     const p = choice[i];
     let r = null;
     try {
-      r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctxId, timeoutMs: 20000 });
+      r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctx, timeoutMs: 20000 });
     } catch (e) {
-      bad++; log.err(`qid=${p.qid} 执行失败: ${e.message}`);
-      continue;
+      if (/context/i.test(e.message)) {
+        const nc = await relocalCtx(cdp, p.qid);
+        if (nc && nc !== ctx) {
+          log.warn(`页面已重渲染，上下文 ${ctx} → ${nc}，重试 qid=${p.qid}`);
+          ctx = nc;
+          try {
+            r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctx, timeoutMs: 20000 });
+          } catch (e2) { bad++; log.err(`qid=${p.qid} 重试失败: ${e2.message}`); continue; }
+        } else {
+          bad++; log.err(`qid=${p.qid} 上下文丢失且无法重定位`); continue;
+        }
+      } else {
+        bad++; log.err(`qid=${p.qid} 执行失败: ${e.message}`); continue;
+      }
     }
     clicks += r.clicks || 0;
     const got = [...(r.after || [])].sort().join('');
@@ -147,7 +175,7 @@ async function applyAnswers(cdp, questions, answers, cfg, log, ctxId) {
 
   if (fill.length) {
     await sleep(600);
-    const res = await cdp.evaluate(`(${FILL_FN})(${JSON.stringify(fill)}, ${g.minGap}, ${g.maxGap})`, { awaitPromise: true, contextId: ctxId, timeoutMs: 120000 + fill.length * (g.maxGap + 3000) });
+    const res = await cdp.evaluate(`(${FILL_FN})(${JSON.stringify(fill)}, ${g.minGap}, ${g.maxGap})`, { awaitPromise: true, contextId: ctx, timeoutMs: 120000 + fill.length * (g.maxGap + 3000) });
     let ok = 0;
     for (const r of res) for (const x of r.res) {
       if (x.err) { bad++; log.err(`填空 qid=${r.qid} ${x.err}`); }
@@ -275,4 +303,4 @@ async function verify(cdp, questions, answers, log, ctxId) {
   return bad;
 }
 
-module.exports = { applyAnswers, saveDraft, submitNow, verify, buildPlan, norm };
+module.exports = { applyAnswers, saveDraft, submitNow, verify, buildPlan, norm, relocalCtx };
