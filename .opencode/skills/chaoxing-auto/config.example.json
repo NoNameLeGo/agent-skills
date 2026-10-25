@@ -23,7 +23,9 @@
     },
     "maxMinutesPerPage": 45,
     "maxConsecutiveStalls": 3,
-    "readSeconds": 0
+    "readSeconds": 0,
+    "readOpenSeconds": 120,
+    "readManualWaitSeconds": 300
   },
   "humanize": {
     "_readme": "答题间隔随机区间（毫秒），模拟人工",
@@ -49,7 +51,7 @@
       "batchSize": 5,
       "fallbacks": [
         {
-          "baseURL": "https://api.fallback.com/v1",
+          "baseURL": "https://api.fallback.example.com/v1",
           "apiKey": "sk-REPLACE_ME_TOO",
           "model": "fallback-model"
         }

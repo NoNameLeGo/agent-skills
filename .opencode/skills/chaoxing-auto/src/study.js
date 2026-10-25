@@ -133,6 +133,9 @@ async function watchCurrent(cdp, cfg, log, { maxMinutes = 45 } = {}) {
     if (ticks % 10 === 1) {
       const pct = v.dur ? ((v.cur / v.dur) * 100).toFixed(1) : '?';
       log.out(`进度 ${v.cur}s / ${v.dur}s (${pct}%) rate=${v.rate} paused=${v.paused}`);
+      // 页面被最小化/被别的窗口盖住 → document.hidden=true，学习通大概率暂停计时（进度一阵一阵不动）
+      const hid = await cdp.evaluate('document.hidden').catch(() => null);
+      if (hid && hid.value === true) log.warn('页面处于隐藏状态（窗口被最小化或被遮挡），学习通可能不计时长，请让该窗口保持可见');
     }
 
     if (v.ended || (v.dur > 0 && v.cur >= v.dur - 1.5)) {

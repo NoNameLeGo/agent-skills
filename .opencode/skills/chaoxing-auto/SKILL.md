@@ -1,27 +1,20 @@
 ---
 name: chaoxing-auto
-description: 学习通/超星自动刷课与自动做题（CDP 版）。用户要刷学习通网课、自动看视频、自动做章节测验或作业、排查学习通自动化失败时使用。零依赖 Node + 独立静音 Edge，支持防复制字体还原、多模型交叉校验答题、自动提交。
-version: 1.1.0
-license: GPL-3.0
+description: "学习通/超星自动刷课与自动做题（CDP 版）。当用户要刷学习通网课、自动看视频、自动做章节测验/作业、或排查学习通自动化失败时使用。零依赖 Node + 独立静音 Edge 实例，支持防复制字体还原、多模型交叉校验答题、自动提交。"
+version: 1.2.0
+agent_created: true
+metadata:
+  author: WorkBuddy
+  engine: cdp
+  emoji: "🎬"
+  project: D:\\Vibe-Coding\\chaoxing-auto
+  repo: https://github.com/NoNameLeGo/agent-skills
 ---
 
 # 学习通自动刷课 + 自动做题
 
-**本技能目录自带完整实现**（零依赖 Node，无需 npm install），整个目录拷到本地任意位置即可用。
-
-```
-.opencode/skills/chaoxing-auto/
-├── SKILL.md               本文件（runbook）
-├── run.js                 CLI 入口
-├── src/                   9 个模块：CDP / 抽题 / 字形还原 / 答案链 / 填答 / 流程
-├── scripts/               字体抓取与调试工具
-├── edge-start.cmd         启动静音调试 Edge（9223）
-├── 刷课.cmd                一键：起 Edge → 查登录 → 开刷
-├── config.example.json    配置模板（复制成 config.json 填 key）
-└── README-项目.md          完整页面事实表与已知限制
-```
-
-安装：OpenCode 把本目录写进 `opencode.json` 的 `skills`；pi 拷到 `~/.pi/agent/skills/`；WorkBuddy 拷到 `~/.workbuddy/skills/`。
+实现位置：**`D:\Vibe-Coding\chaoxing-auto`**（本技能是 runbook，代码不复制）。
+发布副本：`https://github.com/NoNameLeGo/agent-skills` → `.opencode/skills/chaoxing-auto/`（自带完整代码）。
 
 ---
 
@@ -45,7 +38,7 @@ license: GPL-3.0
 ### Stage 0 · 前置检查（必做，跳过会全线失败）
 
 ```bash
-cd /d <本技能目录>
+cd /d D:\Vibe-Coding\chaoxing-auto
 node run.js status
 ```
 
@@ -106,7 +99,8 @@ node run.js course --from-here       # 从用户当前节点之后开始，不�
 |---|---|
 | 视频 | 固定 1x + `--mute-audio` 静音，自动 resume 掉线暂停，播到 ≥90% 即完成任务点 |
 | 章节测验 | 抽题 → 字形还原 → 多模型答题 → 交叉校验 → 填答 → 复核 → **提交** |
-| 文档/PPT/阅读 | `study.readSeconds=0` 时只等 3 秒就过；设 30–60 会尝试读完并标记完成 |
+| 阅读（`readjobv2/show`） | 页面只有入口，**必须点「去阅读」跳进阅读器**才计时；停留/滚动无效。脚本自动点 → 等阅读器（新标签页或就地跳转）→ 停留 `readOpenSeconds`（默认 120s）。**点不开时会在日志里让你手动点**，然后轮询任务点状态 `readManualWaitSeconds`（默认 300s） |
+| 文档/PPT | `study.readSeconds=0` 时只等 3 秒；设 30–60 会滚动停留并尝试标完成 |
 
 ### Stage 4 · 验收
 
@@ -142,7 +136,7 @@ node run.js probe-answer              # 不碰页面，只测答案链
 
 1. **Node 不能 spawn 子进程** —— 本机 `browser.launch()` 永久 EBUSY，Playwright/Puppeteer 不可用，浏览器只能外部拉起。
 2. **Edge 宿主进程一死，浏览器立刻被连带杀掉**。Agent 用后台任务拉起时，任务结束（含对话轮次结束）Edge 就没了 → 长跑必须让用户双击 `刷课.cmd`。
-3. **Edge 窗口不能最小化**，学习通判定离开页面会暂停计时。
+3. **Edge 窗口不能最小化，也不能被别的窗口完全遮挡** —— `document.hidden=true` 时学习通判「离开页面」，视频会频繁自动暂停、计时不记。日志里会打 `页面处于隐藏状态…`。放旁边/缩小都行，别盖住。
 4. **单账号串行**：`state/run.lock` 文件锁，第二个实例直接退出。
 5. 连 127.0.0.1 用 `node:http` 而非 `fetch`（本机有 `HTTP_PROXY`）。
 6. `/json/new` 只接受 **PUT**，GET 会 405。
@@ -156,9 +150,11 @@ node run.js probe-answer              # 不碰页面，只测答案链
 | 目录项 | `div.posCatalog_select`，`id="cur{kid}"`；章标题带 `firstLayer` |
 | 已完成 | 项内存在 `.icon_Completed` |
 | 章节切换 | `getTeacherAjax()` → GET `/mycourse/studentstudyAjax` → **整块重写 `#mainid`**，顶层 URL 不变 |
+| ⚠️ 切换失效 | **部分目录项的 `.posCatalog_name` 没有 `onclick`**（实测 117 项里 15 项），`click()` 完全没反应。必须校验 `#iframe` 的 `knowledgeid` 真的变了，没变就兜底直接调 `getTeacherAjax(cid, clazzid, kid)`（cid/clazzid 从任意带 onclick 的兄弟节点抠） |
 | 视频 | `iframe.ans-attach-online` → `ananas/modules/video/index.html`，内含 `<video>` |
-| 任务点条件 | 观看 ≥ 总时长 90%；未完成前不可拖拽、不可离开 |
-| 顺序解锁 | 前一任务点未完成时点后面的节点会被服务端退回原节（不是 bug） |
+| 任务点条件 | 视频观看 ≥ 总时长 90%；未完成前不可拖拽、不可离开 |
+| 顺序解锁 | 前一任务点未完成时点后面的节点会被服务端退回原节（不是 bug）→ 以页面真实 kid 为准 |
+| 阅读任务点 | `mooc-ans/coursedata/readjobv2/show`，页面只给一句「点击去阅读」+ 入口（`a.readTitleText` 无 href / 文本为「去阅读」的 span 无 onclick，由内联 JS 绑定）。**停留不计时，必须点进阅读器** |
 | 测验页 | `mooc-ans/work/doHomeWorkNew`，题目 `#question{qid}` |
 | 选项布局 A | `div.answerBg`（老版） |
 | 选项布局 B | `li[qid][qtype] > span.num_option[data] + a.after` |
@@ -186,11 +182,14 @@ node run.js probe-answer              # 不碰页面，只测答案链
 ## 七、答题链路与分数预期
 
 ```
-freeai（agnes-3.0-flash，5 题 3.6s）
-  └ crossCheck：同一批题交给 fallbacks[0]（dots3）复核
-      └ 答案不一致 → 带双方答案裁决一次
-          └ 仍不一致 → 用主模型答案
+freeai（agnes-3.0-flash，5 题 1.5–10s）
+  ├ crossCheck：同一批题交给 fallbacks[0]（dots3）复核
+  │   └ 答案不一致 → 带双方答案裁决一次 → 仍不一致用主模型答案
+  └ 主模型漏解的题 → 备用模型（dots3）直接补答（API，秒级）
 ```
+
+默认链 `answer.chain = ['freeai','websearch']`。
+**`webai`（网页版千问）已移出默认链**：实测要等 188s 还读到空回复，且会新开标签页。`localllm` 也默认不启用（本机无 ollama）。
 
 **不保证满分**。实测：100 分、80 分各一次。两个模型都会错题，交叉校验只是把错误率压下来。
 
@@ -212,13 +211,16 @@ freeai（agnes-3.0-flash，5 题 3.6s）
 | 提交卡在弹层 | 用 `evaluateAll` 找 `.jb_btn`，不能只在 iframe 里找 |
 | `Cannot find context` | 页面重渲染，`relocalCtx` 重定位（已自动处理） |
 | `CDP timeout` / 标签页消失 | 渲染进程崩溃，`/json/close` 关标签重开 |
-| 视频不动 | Edge 被最小化 / 平台暂停，脚本每 3 秒自动 resume |
+| 视频不动 | Edge 被最小化 / 被完全遮挡 / 平台暂停，脚本每 3 秒自动 resume；日志有 `页面处于隐藏状态` 就是遮挡 |
+| 整章被「已批阅，跳过」连续吞掉 | 切节没生效（目录项缺 onclick）。看日志有没有 `服务端退回待完成节点` / `章节切换未生效`，新版会自动兜底 `getTeacherAjax` |
+| 阅读节点停 60s 也不完成 | 这类节点必须点「去阅读」进阅读器，光停留不计时；脚本点不开时会提示你手动点，然后轮询完成状态 |
+| 阅读任务点等很久不变 | 学习通阅读时长是**当天累计、次日更新**，页面显示 `0.0分钟` 属正常；任务点图标通常要点进阅读器读够时间才会亮 |
 
 ---
 
 ## 九、维护
 
-改了工作区 `src/*` 之后，同步到发布仓：
+改了工作区 `D:\Vibe-Coding\chaoxing-auto\src\*` 之后，同步到发布仓：
 
 ```bash
 cp src/*.js <clone>/.opencode/skills/chaoxing-auto/src/

@@ -108,6 +108,27 @@ async function solve(questions, cfg, log, ctx = {}) {
     }
   }
 
+  // 兜底补答：主模型漏解的题，直接交给备用 API 模型（dots3）再答一次。
+  // 比 webai（网页版千问）快一个数量级，而且不会新开标签页、不吃 UI 时序。
+  if (rest.length) {
+    const fb = (cfg.freeai && cfg.freeai.fallbacks && cfg.freeai.fallbacks[0]) || null;
+    if (fb) {
+      log.info('— 备用模型补答未解 ' + rest.length + ' 题');
+      try {
+        const { runTier } = require('./openaiCompat');
+        const m2 = await runTier(rest, { ...fb, enabled: true, batchSize: 6, timeoutMs: 120000 }, log, 'fallback-answer');
+        for (const [qid, v] of m2) {
+          if (answers[qid]) continue;
+          answers[qid] = { ans: v.ans, src: 'fallback' };
+          const q = rest.find(x => x.qid === qid);
+          if (q) cache[qkey(q)] = { type: v.ans.type, ans: v.ans.ans, src: v.src };
+        }
+        rest = rest.filter(q => !answers[q.qid]);
+        log[rest.length ? 'warn' : 'ok'](`备用模型补答后剩余 ${rest.length} 题未解`);
+      } catch (e) { log.warn('备用模型补答失败: ' + e.message); }
+    }
+  }
+
   saveJson(CACHE_FILE, cache);
   return { answers, unsolved: rest };
 }
