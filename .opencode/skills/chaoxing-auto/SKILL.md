@@ -98,7 +98,9 @@ node run.js course --from-here       # 从用户当前节点之后开始，不�
 | 页面类型 | 行为 |
 |---|---|
 | 视频 | 固定 1x + `--mute-audio` 静音，自动 resume 掉线暂停，播到 ≥90% 即完成任务点 |
-| 章节测验 | 抽题 → 字形还原 → 多模型答题 → 交叉校验 → 填答 → 复核 → **提交** |
+| **视频内弹题** | 播放中弹出的 `.ans-videoquiz` 覆盖层。**作答期间绝不能再强制 `play()`**（会把模块自己按下的暂停顶回去，弹题被直接冲过去 = 等于没答）。脚本检测到就出答案 → 勾选 → 点 `#videoquiz-submit` → 点 `#videoquiz-continue` |
+| **节内章节测验**（`.prev_ul li` 的「2章节测验」标签） | 一节常是「1视频 + 2章节测验」两个任务点，**只播视频目录不打勾**。视频播完脚本自动点标签 → 等题目 → 抽题 → 答题 → 填 → 复核 → 提交 |
+| 章节测验（整页） | 抽题 → 字形还原 → 多模型答题 → 交叉校验 → 填答 → 复核 → **提交** |
 | 阅读（`readjobv2/show`） | 页面只有入口，**必须点「去阅读」跳进阅读器**才计时；停留/滚动无效。脚本自动点 → 等阅读器（新标签页或就地跳转）→ 停留 `readOpenSeconds`（默认 120s）。**点不开时会在日志里让你手动点**，然后轮询任务点状态 `readManualWaitSeconds`（默认 300s） |
 | 文档/PPT | `study.readSeconds=0` 时只等 3 秒；设 30–60 会滚动停留并尝试标完成 |
 
@@ -124,6 +126,7 @@ node run.js list                      # 目录：已完成/未完成
 node run.js probe                     # 所有 iframe 上下文的 DOM 计数（改选择器用）
 node run.js course [--max N] [--from-here]
 node run.js quiz [--submit] [--answers f.json]
+node run.js videoquiz                 # 只处理当前可见的视频内弹题
 node run.js submit                    # 只提交当前页已填答案
 node run.js shot out.png              # 截图
 node run.js eval "<js>" [--all]       # 页面里执行 JS
@@ -140,6 +143,8 @@ node run.js probe-answer              # 不碰页面，只测答案链
 4. **单账号串行**：`state/run.lock` 文件锁，第二个实例直接退出。
 5. 连 127.0.0.1 用 `node:http` 而非 `fetch`（本机有 `HTTP_PROXY`）。
 6. `/json/new` 只接受 **PUT**，GET 会 405。
+7. **永远不要对「没有 onclick 的目录项」调 `getTeacherAjax`** —— 服务端会给「提交失败」页，`#mainid` 被打坏后整页作废（`#iframe` 消失）。目标不可点 → 只能刷新页面等权限下发。
+8. **视频内弹题出现时不能强制 `play()`** —— 模块靠 `pause()` 等作答，强行播放会把弹题顶过去，等于没答（任务点仍算完成，但弹题正确率是 0）。
 
 ---
 
@@ -149,17 +154,21 @@ node run.js probe-answer              # 不碰页面，只测答案链
 |---|---|
 | 目录项 | `div.posCatalog_select`，`id="cur{kid}"`；章标题带 `firstLayer` |
 | 已完成 | 项内存在 `.icon_Completed` |
-| 章节切换 | `getTeacherAjax()` → GET `/mycourse/studentstudyAjax` → **整块重写 `#mainid`**，顶层 URL 不变 |
-| ⚠️ 切换失效 | **部分目录项的 `.posCatalog_name` 没有 `onclick`**（实测 117 项里 15 项），`click()` 完全没反应。必须校验 `#iframe` 的 `knowledgeid` 真的变了，没变就兜底直接调 `getTeacherAjax(cid, clazzid, kid)`（cid/clazzid 从任意带 onclick 的兄弟节点抠） |
-| 视频 | `iframe.ans-attach-online` → `ananas/modules/video/index.html`，内含 `<video>` |
-| 任务点条件 | 视频观看 ≥ 总时长 90%；未完成前不可拖拽、不可离开 |
+| 章节切换 | `getTeacherAjax()` → GET `/mycourse/studentstudyAjax` → **整块重写 `#mainid`**，顶层 URL 不变；实测 **15–25s** 才生效（轮询要给 40×700ms） |
+| ⚠️ 切换失效（根因） | 侧栏**只有「当前节 + 下一个未完成节」挂 `onclick`**（顺序解锁），其余全是裸 `span`；而 `getTeacherAjax` **只重写 `#mainid`、不刷新侧栏** → 一节做完后下一节永远拿不到 onclick。硬调 `getTeacherAjax` 请求未解锁节点 → 服务端返回「提交失败」页，把 `#mainid` 打坏（`#iframe` 消失、body 只剩「章节未开放」）。**正解：`Page.reload` 刷新学习页**让服务端重新下发目录权限，最多重试 4 次 |
+| 节内任务点 tab | `.prev_ul li`，`onclick="changeDisplayContent(num,totalnum,kid,cid,clazzid,'',crossid)"`；cards 的 `num = 标签序号-1`。文本形如「1视频 / 2章节测验」 |
+| ⚠️ 节内顺序解锁 | **视频没播完时测验 tab 是空的**（点进去白屏，不是加载慢）→ 节内测验只能放在视频之后处理 |
+| 视频 | `iframe.ans-attach-online` → `ananas/modules/video/index.html`（2026-09 版 `?v=2026-0920-1154`），内含 `<video>` |
+| **视频内弹题** | `div.ans-videoquiz#videoquiz-<n>`：`.tkTopic_title` 题型、`.tkItem_title` 题干、`li.ans-videoquiz-opt > label > input`（文本「A、对」）、`#videoquiz-submit` 提交、`#videoquiz-continue` 继续学习、`#rightNum` 已答对数。**视频模块自己会暂停等作答**，脚本的 `play()` 会把它顶回去 → 必须先答再放行 |
+| 任务点条件 | 视频观看 ≥ 总时长 90%；一节可能是「1视频 + 2章节测验」两个任务点，**都做完目录才打勾**，只有视频不做测验下一节不解锁 |
 | 顺序解锁 | 前一任务点未完成时点后面的节点会被服务端退回原节（不是 bug）→ 以页面真实 kid 为准 |
 | 阅读任务点 | `mooc-ans/coursedata/readjobv2/show`，页面只给一句「点击去阅读」+ 入口（`a.readTitleText` 无 href / 文本为「去阅读」的 span 无 onclick，由内联 JS 绑定）。**停留不计时，必须点进阅读器** |
-| 测验页 | `mooc-ans/work/doHomeWorkNew`，题目 `#question{qid}` |
+| 测验页 | `mooc-ans/work/doHomeWorkNew`（未作答）/ `mooc-ans/work/selectWorkQuestionYiPiYue`（已批阅，页头有「第N次作答 本次成绩XX分」，可核对分数），题目 `#question{qid}` |
 | 选项布局 A | `div.answerBg`（老版） |
 | 选项布局 B | `li[qid][qtype] > span.num_option[data] + a.after` |
+| **选项布局 C**（2025-10 新版章节测验） | 容器 `div.TiMu.newTiMu.ans-cc#question{qid}`；题干 `.Zy_TItle .qtContent`（首个子元素 `span.newZy_TItle` 是「【多选题】」）；选项 `ul.Zy_ulTop.qtDetail > li.clearfix > i.fl("A、") + a(文本)`。**没有 li[qid] / span.num_option / .answerBg**，字母在 `<i>` 里，勾选靠给 `li`（和里面的 `a`）发 click |
 | ⚠️ 选项映射 | `span` 文本才是显示的 A/B/C/D，`data` 是提交码，**顺序被打乱**。必须按显示字母排序再映射 |
-| 提交按钮 | `a.btnSubmit[onclick="btnBlueSubmit();"]`；暂存 `a.btnSave[onclick="noSubmit();"]` |
+| 提交按钮 | 布局 A/B：`a.btnSubmit[onclick="btnBlueSubmit();"]`；布局 C：文字按钮「提交」（暂存是「暂时保存」）→ 需按 innerText 兜底找 |
 | ⚠️ 确认弹层 | 「确认提交？」在**外层 studentstudy 文档**，按钮 `.jb_btn`。必须 `evaluateAll` 全上下文找 |
 | ⚠️ 上下文失效 | 视频播完 / 提交前 iframe 会重渲染，旧 contextId 立刻失效 → 必须重新定位 |
 
@@ -198,6 +207,8 @@ freeai（agnes-3.0-flash，5 题 1.5–10s）
 - 填答有异常 → 不提交，只暂存
 - 整页没选项（已批阅页）→ 放弃本页
 
+布局 C 没有隐藏 `#answer{qid}` 真值字段，`verify()` 改成从「选中的 `li`」反解字母；提交后 iframe 会立刻重渲染，`复核失败: Cannot find context` 属正常（提交已成立，用已批阅页的成绩核对即可）。
+
 ---
 
 ## 八、排障
@@ -212,7 +223,11 @@ freeai（agnes-3.0-flash，5 题 1.5–10s）
 | `Cannot find context` | 页面重渲染，`relocalCtx` 重定位（已自动处理） |
 | `CDP timeout` / 标签页消失 | 渲染进程崩溃，`/json/close` 关标签重开 |
 | 视频不动 | Edge 被最小化 / 被完全遮挡 / 平台暂停，脚本每 3 秒自动 resume；日志有 `页面处于隐藏状态` 就是遮挡 |
-| 整章被「已批阅，跳过」连续吞掉 | 切节没生效（目录项缺 onclick）。看日志有没有 `服务端退回待完成节点` / `章节切换未生效`，新版会自动兜底 `getTeacherAjax` |
+| 整章被「已批阅，跳过」连续吞掉 | 切节没生效（目录项缺 onclick）。看日志有没有 `服务端退回待完成节点` / `章节切换未生效`；新版会**自动刷新学习页解锁**，不再兜底 `getTeacherAjax`（那条路会拿到「提交失败」页） |
+| 日志 `目标节点尚未解锁（第 N/4 次检查），刷新学习页重试` | 正常自愈路径：说明上一节刚做完、侧栏还没下发下一节权限，刷新即可；连刷 4 次仍不解锁才是真问题（前一个任务点确实没完成） |
+| 视频播完目录却不打勾 / 下一节点一直锁着 | 这节还有「章节测验」任务点没做（`.prev_ul li` 第二个标签）。日志应有 `本节有「2章节测验」标签，切换过去作答`；没有就是 tabs 没抓到，手动点一下标签再跑 |
+| 日志 `本节无测验标签：1视频` | 该节只有视频，正常跳过 |
+| 视频内弹题被「冲过去」没答 | 弹题出现时模块会 `pause()`，脚本的 `play()` 会顶回去。新版每 3 秒先查 `.ans-videoquiz`，有就停止强制播放并作答；单测用 `node run.js videoquiz` |
 | 阅读节点停 60s 也不完成 | 这类节点必须点「去阅读」进阅读器，光停留不计时；脚本点不开时会提示你手动点，然后轮询完成状态 |
 | 阅读任务点等很久不变 | 学习通阅读时长是**当天累计、次日更新**，页面显示 `0.0分钟` 属正常；任务点图标通常要点进阅读器读够时间才会亮 |
 

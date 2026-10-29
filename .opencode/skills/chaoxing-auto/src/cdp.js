@@ -168,6 +168,31 @@ class CDP {
     return href;
   }
 
+  /**
+   * 把浏览器窗口从最小化恢复成正常（页面 hidden=true 时学习通会停止计时，视频卡住不动）。
+   * @returns {Promise<boolean>} 是否真的做了恢复
+   */
+  async unminimize() {
+    try {
+      const r = await this.send('Browser.getWindowForTarget', {}, 6000);
+      const windowId = r && r.windowId;
+      if (windowId == null) return false;
+      const b = await this.send('Browser.getWindowBounds', { windowId }, 6000);
+      const state = b && b.bounds && b.bounds.windowState;
+      if (state === 'minimized') {
+        await this.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } }, 6000);
+        return true;
+      }
+      return false;
+    } catch { return false; }
+  }
+
+  /** 让页面以为自己在前台（缓解计时器节流），只是兜底手段，不能替代真的把窗口放出来 */
+  async focusEmulate() {
+    try { await this.send('Emulation.setFocusEmulationEnabled', { enabled: true }, 5000); return true; }
+    catch { return false; }
+  }
+
   close() { try { this.ws.close(); } catch {} }
 }
 

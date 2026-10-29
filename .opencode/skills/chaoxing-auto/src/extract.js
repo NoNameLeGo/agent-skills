@@ -29,7 +29,7 @@ const EXTRACT_SRC = `(() => {
 
     const qtypeAttr = node.getAttribute('qtype') || (node.querySelector('[qtype]') || {}).getAttribute?.('qtype') || '';
     let stem = '';
-    for (const s of ['.Zy_TItle', '.mark_name', '.q_content', '.subject', '.questionTitle']) {
+    for (const s of ['.Zy_TItle .qtContent', '.qtContent', '.Zy_TItle', '.mark_name', '.q_content', '.subject', '.questionTitle']) {
       const e = node.querySelector(s);
       if (e && (txt(e) || latex(e))) { stem = txt(e) || latex(e); break; }
     }
@@ -69,6 +69,21 @@ const EXTRACT_SRC = `(() => {
       if (options.some(o => o.label)) {
         options.sort((a, b) => (a.label || 'ZZ').localeCompare(b.label || 'ZZ'));
       }
+    }
+
+    // 布局 C：div.TiMu.newTiMu（2025-10 新版章节测验）
+    //   <ul class="Zy_ulTop qtDetail"><li class="clearfix"><i class="fl">A、</i><a ...>选项文本</a></li>
+    //   没有 li[qid]、没有 span.num_option、没有 .answerBg，字母在 <i> 里
+    if (!options.length) {
+      node.querySelectorAll('ul.Zy_ulTop li, ul.qtDetail li').forEach(li => {
+        const i = li.querySelector('i');
+        const a = li.querySelector('a');
+        if (!i || !a) return;
+        const label = txt(i).replace(/[^A-Za-z]/g, '').toUpperCase();
+        if (!label) return;
+        const t = txt(a) || txt(li);
+        options.push({ data: label, label, text: t, from: 'newTiMu' });
+      });
     }
 
     // 判断：选项 data 是 true/false

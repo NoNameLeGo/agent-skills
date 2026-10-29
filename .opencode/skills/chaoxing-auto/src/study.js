@@ -11,6 +11,7 @@
  * 页面里再设 video.muted = true 做双保险；两者都不影响 playbackRate 与进度上报。
  */
 const { sleep, randInt } = require('./util');
+const { peekVideoQuiz, answerVideoQuiz, dismissVideoQuiz } = require('./videoquiz');
 
 /* ---------------- 目录 ---------------- */
 
@@ -106,6 +107,8 @@ async function watchCurrent(cdp, cfg, log, { maxMinutes = 45 } = {}) {
   const mute = cfg.study?.muteVideoElement !== false;
   const deadline = Date.now() + maxMinutes * 60 * 1000;
   let stalls = 0, lastCur = -1, ticks = 0;
+  const vqSeen = new Set();
+  let vqAnswered = 0, hiddenWarn = 0;
 
   // 等 video 出现（章节可能先加载 PPT / 文档）
   let found = null;
@@ -125,6 +128,30 @@ async function watchCurrent(cdp, cfg, log, { maxMinutes = 45 } = {}) {
     ticks++;
     const cur = await findVideoCtx(cdp);
     if (!cur) { await sleep(3000); continue; }
+
+    // 视频内弹题：出现了就先作答。作答期间**绝不能**调 ENFORCE_FN，
+    // 否则 play() 会把模块自己按下的暂停顶回去，弹题被直接冲过去（等于没答）。
+    const vq = await peekVideoQuiz(cdp, cur.ctx).catch(() => null);
+    if (vq && vq.count) {
+      const key = vq.id + '|' + vq.qs.map(q => q.stem).join('|').slice(0, 120);
+      if (vq.continueVisible) {
+        // 已提交过，只差「继续学习」
+        if (!vqSeen.has(key)) { vqSeen.add(key); }
+        await dismissVideoQuiz(cdp, cur.ctx).catch(() => {});
+        await sleep(1000);
+        continue;
+      }
+      if (!vqSeen.has(key)) {
+        vqSeen.add(key);
+        vqAnswered++;
+        log.ok(`视频内弹题（第 ${vqAnswered} 次｜${vq.title || '未知题型'} ${vq.count} 题）：${String(vq.qs[0].stem).slice(0, 45)}`);
+        try { await answerVideoQuiz(cdp, cur.ctx, cfg, log, vq); }
+        catch (e) { log.warn('弹题处理异常: ' + e.message); await dismissVideoQuiz(cdp, cur.ctx).catch(() => {}); }
+        await sleep(1200);
+        continue;                       // 本轮不推播放进度，下一 tick 再正常走
+      }
+    }
+
     await cdp.evaluate(`(${ENFORCE_FN})(${rate}, ${mute})`, { contextId: cur.ctx }).catch(() => {});
     await cdp.evaluateAll(KILL_POPUP_FN).catch(() => {});
 
@@ -133,13 +160,24 @@ async function watchCurrent(cdp, cfg, log, { maxMinutes = 45 } = {}) {
     if (ticks % 10 === 1) {
       const pct = v.dur ? ((v.cur / v.dur) * 100).toFixed(1) : '?';
       log.out(`进度 ${v.cur}s / ${v.dur}s (${pct}%) rate=${v.rate} paused=${v.paused}`);
-      // 页面被最小化/被别的窗口盖住 → document.hidden=true，学习通大概率暂停计时（进度一阵一阵不动）
+    }
+    // 页面被最小化/被别的窗口盖住 → document.hidden=true，学习通就不计时了（表现为 paused=false 但 currentTime 不动）
+    // 注意：evaluate 直接返回布尔值，别写 hid.value（旧代码这么写，告警永远不会触发）
+    if (ticks % 3 === 1) {
       const hid = await cdp.evaluate('document.hidden').catch(() => null);
-      if (hid && hid.value === true) log.warn('页面处于隐藏状态（窗口被最小化或被遮挡），学习通可能不计时长，请让该窗口保持可见');
+      if (hid === true) {
+        if (hiddenWarn++ % 20 === 0) {
+          const fixed = await cdp.unminimize().catch(() => false);
+          await cdp.focusEmulate().catch(() => {});
+          log.warn('页面处于隐藏状态（窗口被最小化或被遮挡）→ 学习通不计时长，视频会卡住不动' +
+            (fixed ? '；已尝试把窗口恢复成正常大小' : '；请手动把那个 Edge 窗口放出来并保持可见'));
+        }
+        await cdp.send('Page.bringToFront', {}).catch(() => {});
+      }
     }
 
     if (v.ended || (v.dur > 0 && v.cur >= v.dur - 1.5)) {
-      log.ok('本节视频播放结束');
+      log.ok('本节视频播放结束' + (vqAnswered ? `（期间处理视频内弹题 ${vqAnswered} 次）` : ''));
       await sleep(2000);
       await cdp.evaluateAll(KILL_POPUP_FN).catch(() => {});
       return { type: 'video-ended', dur: v.dur };

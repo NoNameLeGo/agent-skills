@@ -125,7 +125,7 @@ async function runCourse(cdp, cfg, log, { maxChapters = 200, skipDone = true, fr
     log.info(`—— [${n + 1}/${todo.length}] ${ch.name || ch.kid}（kid=${ch.kid}）`);
     let sw = null;
     try {
-      sw = await clickChapter(cdp, ch.i, ch.kid);
+      sw = await clickChapter(cdp, ch.i, ch.kid, log);
       switchFailStreak = 0;
     } catch (e) {
       log.err('打开章节失败: ' + e.message);
@@ -171,8 +171,11 @@ async function runCourse(cdp, cfg, log, { maxChapters = 200, skipDone = true, fr
       r && r.ok ? done++ : failed++;
     } else if (kind === 'video') {
       const r = await watchCurrent(cdp, cfg, log, { maxMinutes: cfg.study?.maxMinutesPerPage || 45 });
-      if (r.type === 'video-ended') done++;
-      else if (r.type === 'no-video') skipped++;
+      if (r.type === 'video-ended') {
+        done++;
+        // 视频完了还有本章测验任务点，必须一起做完，否则目录不打勾、下一节不解锁
+        try { await doSectionQuiz(cdp, cfg, log); } catch (e) { log.warn('本节测验处理异常: ' + e.message); }
+      } else if (r.type === 'no-video') skipped++;
       else failed++;
     } else {
       // 文档 / PPT / 阅读类任务点。
@@ -233,8 +236,9 @@ const AJAX_SWITCH_FN = `(function(kid){
   } catch (e) { return { ok: false, why: e.message }; }
 })`;
 
-/** 轮询等 iframe 的 knowledgeid 变化，返回最新 kid（超时返回原值） */
-async function waitKidChange(cdp, prevKid, tries = 14) {
+/** 轮询等 iframe 的 knowledgeid 变化，返回最新 kid（超时返回原值）。
+ *  实测切节走 getTeacherAjax 是整块重写 #mainid，慢的时候要 15–25s，别等太短。 */
+async function waitKidChange(cdp, prevKid, tries = 40) {
   for (let i = 0; i < tries; i++) {
     await sleep(700);
     const now = await cdp.evaluate(KID_EXPR).catch(() => '');
@@ -243,24 +247,69 @@ async function waitKidChange(cdp, prevKid, tries = 14) {
   return prevKid;
 }
 
-async function clickChapter(cdp, idx, kid) {
-  // 已经是当前章节就不用点（点了 iframe 也不会变，白等 14 秒）
-  const curKid = await cdp.evaluate(KID_EXPR).catch(() => '');
+/** 目标目录项是否挂了 onclick（顺序解锁只给「当前节 + 下一个待完成节」挂） */
+const CLICKABLE_FN = `(function(kid){
+  const el = document.getElementById('cur' + kid);
+  const n = el && el.querySelector('.posCatalog_name');
+  return !!(n && n.getAttribute('onclick'));
+})`;
+
+/** 等学习页 iframe 就绪，返回当前 kid */
+async function waitKidReady(cdp, tries = 25) {
+  for (let i = 0; i < tries; i++) {
+    const k = await cdp.evaluate(KID_EXPR).catch(() => '');
+    if (k) return k;
+    await sleep(1000);
+  }
+  return '';
+}
+
+/**
+ * 确保目标节点可点。
+ * 关键事实（2026-10-29 实测）：侧栏目录只有「当前节 + 下一个未完成节」带 onclick，
+ * 且**切节不会刷新侧栏**（getTeacherAjax 只重写 #mainid）→ 一节做完后不刷新页面，
+ * 下一节永远拿不到 onclick，旧版靠 getTeacherAjax 硬调补，结果服务端给「提交失败」页把 #mainid 打坏。
+ * 正确做法：刷新学习页让服务端重新下发目录权限，再点。
+ */
+async function ensureClickable(cdp, kid, log, maxTries = 4) {
+  if (!kid) return true;
+  for (let i = 0; i < maxTries; i++) {
+    const ok = await cdp.evaluate(`(${CLICKABLE_FN})(${JSON.stringify(String(kid))})`).catch(() => false);
+    if (ok) return true;
+    if (i === maxTries - 1) return false;
+    log.info(`目标节点尚未解锁（第 ${i + 1}/${maxTries} 次检查），刷新学习页重试`);
+    await cdp.send('Page.reload', {}).catch(() => {});
+    await sleep(4000);
+    await waitKidReady(cdp);
+    await sleep(2000);
+  }
+  return false;
+}
+
+async function clickChapter(cdp, idx, kid, log = console) {
+  // 已经是当前章节就不用点（点了 iframe 也不会变，白等）
+  let curKid = await cdp.evaluate(KID_EXPR).catch(() => '');
   if (kid && curKid === String(kid)) return { ok: true, skipped: true, name: '(已是当前节)', finalKid: curKid };
 
-  let finalKid = curKid;
-  const r = await cdp.evaluate(`(${CLICK_CHAPTER_FN})(${idx}, ${JSON.stringify(kid || '')})`);
-  if (r && r.ok) finalKid = await waitKidChange(cdp, curKid);
+  const clickable = await ensureClickable(cdp, kid, log);
+  curKid = (await cdp.evaluate(KID_EXPR).catch(() => '')) || curKid;
 
-  // 点击没生效（无 onclick / 被拦）→ 直接调 getTeacherAjax
-  if (!finalKid || finalKid === curKid) {
-    const a = await cdp.evaluate(`${AJAX_SWITCH_FN}(${JSON.stringify(kid || '')})`).catch(() => null);
-    if (a && a.ok) finalKid = await waitKidChange(cdp, curKid, 16);
-    else if (!r || !r.ok) throw new Error('目录项点击失败且无兜底: ' + JSON.stringify(r) + ' / ' + JSON.stringify(a));
+  let finalKid = curKid;
+  if (clickable) {
+    const r = await cdp.evaluate(`(${CLICK_CHAPTER_FN})(${idx}, ${JSON.stringify(kid || '')})`);
+    if (r && r.ok) finalKid = await waitKidChange(cdp, curKid);
+
+    // 可点但没生效（被拦/事件没绑上）→ 兜底直接调 getTeacherAjax（此时节点已解锁，不会被服务端拒）
+    if (!finalKid || finalKid === curKid) {
+      const a = await cdp.evaluate(`${AJAX_SWITCH_FN}(${JSON.stringify(kid || '')})`).catch(() => null);
+      if (a && a.ok) finalKid = await waitKidChange(cdp, curKid, 20);
+    }
   }
 
   // 仍然没变 → 明确报错，绝不冒充「已批阅」往下跳（否则会把整章吞掉）
-  if (!finalKid || finalKid === curKid) throw new Error(`章节切换未生效（停在 kid=${curKid || '?'}）`);
+  if (!finalKid || finalKid === curKid) {
+    throw new Error(`章节切换未生效（kid=${kid}，可点=${clickable}，停在 kid=${curKid || '?'}）`);
+  }
   return { ok: true, finalKid, redirected: !!(kid && finalKid !== String(kid)) };
 }
 
@@ -269,6 +318,56 @@ const DETECT_FN = `(function(){
   let hasV = document.querySelectorAll('video').length > 0;
   return { hasQ, hasV, url: location.href, title: document.title };
 })()`;
+
+/** 本节的任务点标签页（.prev_ul li），如「1视频 / 2章节测验」 */
+const TABS_FN = `(function(){
+  return [...document.querySelectorAll('.prev_ul li')].map((li, i) => ({
+    idx: i,
+    txt: (li.innerText || '').replace(/\\s+/g, '').slice(0, 12),
+    active: /(^|\\s)active(\\s|$)/.test(li.className || ''),
+    oc: String(li.getAttribute('onclick') || '').slice(0, 60),
+  }));
+})()`;
+
+const CLICK_TAB_FN = `(function(idx){
+  const lis = [...document.querySelectorAll('.prev_ul li')];
+  const li = lis[idx];
+  if (!li) return { ok: false, why: 'no tab' };
+  li.click();
+  return { ok: true, txt: (li.innerText || '').replace(/\\s+/g, '').slice(0, 12) };
+})`;
+
+/**
+ * 视频播完后处理同一节里的「章节测验」标签页。
+ * 实测：一节 = 1视频 + 2章节测验 两个任务点，**都做完目录才会打勾**；
+ * 只播视频就往下跳，下一节永远解锁不了（顺序解锁），所以这里必须补上。
+ * 注意：视频没播完时测验 tab 是空的（节内也顺序解锁），所以只能放在视频之后调。
+ */
+async function doSectionQuiz(cdp, cfg, log) {
+  const tabs = await cdp.evaluate(TABS_FN).catch(() => null);
+  if (!Array.isArray(tabs) || !tabs.length) { log.info('本节没有任务点标签页'); return false; }
+  const quizTab = tabs.find(t => /测验|测试|作业/.test(t.txt));
+  if (!quizTab) { log.info('本节无测验标签：' + tabs.map(t => t.txt).join(' / ')); return false; }
+
+  log.info(`本节有「${quizTab.txt}」标签，切换过去作答`);
+  await cdp.evaluate(`(${CLICK_TAB_FN})(${quizTab.idx})`).catch(() => null);
+
+  // 等题目出现（新版题库在嵌套 iframe 里，加载偏慢）
+  let n = 0;
+  for (let i = 0; i < 12; i++) {
+    await sleep(2500);
+    const rs = await cdp.evaluateAll('document.querySelectorAll(\'[id^="question"]\').length', { timeoutMs: 8000 }).catch(() => []);
+    n = rs.reduce((m, r) => Math.max(m, Number(r.value) || 0), 0);
+    if (n) break;
+  }
+  if (!n) { log.warn('测验标签已打开但没抓到题目（可能还没解锁/未加载），跳过'); return false; }
+
+  const r = await handleQuestions(cdp, cfg, log, {
+    autoSubmit: cfg.study?.chapterQuiz?.autoSubmit !== false,
+    tag: `quiz_${await cdp.evaluate(KID_EXPR).catch(() => '')}`,
+  });
+  return !!(r && r.ok);
+}
 
 async function detectKind(cdp) {
   const kid = await cdp.evaluate(KID_EXPR).catch(() => '');

@@ -92,6 +92,23 @@ const LOGIN_RE = /passport|chaoxing\.com\/login|\/login|cas\.chaoxing/;
     return;
   }
 
+  if (cmd === 'videoquiz') {
+    // 处理视频播放中的弹题（ananas 新版视频模块的 .ans-videoquiz 覆盖层）
+    const { BOX_FN, answerVideoQuiz, dismissVideoQuiz } = require('./src/videoquiz');
+    const rs = await cdp.evaluateAll(BOX_FN, { timeoutMs: 12000 });
+    const hit = rs.find(r => r.value && r.value.count);
+    if (!hit) { log.warn('当前没有可见的视频弹题'); cdp.close(); return; }
+    log.info(`弹题上下文 ${hit.contextId}｜${hit.value.title} ${hit.value.count} 题｜${hit.value.rightText}`);
+    if (hit.value.continueVisible) {
+      log.info('弹题已作答，只点「继续学习」');
+      await dismissVideoQuiz(cdp, hit.contextId);
+    } else {
+      await answerVideoQuiz(cdp, hit.contextId, cfg, log, hit.value);
+    }
+    cdp.close();
+    return;
+  }
+
   if (cmd === 'submit') {
     // 只提交当前页面上已经填好的答案（不重新抽题、不改答案），用于「暂存后人工确认再交卷」
     const probes = await cdp.evaluateAll(`document.querySelectorAll('[id^="question"]').length`, { timeoutMs: 8000 });

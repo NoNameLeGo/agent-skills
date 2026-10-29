@@ -14,7 +14,8 @@ const { sleep, randInt } = require('./util');
 
 // 单题版本：一题一次 evaluate，题间间隔由 Node 侧控制。
 // 批量版出现过「整页 await 不回包」——点完最后一题页面重渲染，promise 就丢了。单题更稳，也能打印进度。
-const APPLY_ONE_FN = `(function (p) {
+const APPLY_ONE_FN = `(async function (p) {
+  const wait = ms => new Promise(r => setTimeout(r, ms));
   const node = document.getElementById('question' + p.qid);
   if (!node) return { qid: p.qid, err: 'no node' };
   const isMulti = p.type === 'multi';
@@ -24,6 +25,39 @@ const APPLY_ONE_FN = `(function (p) {
   const target = new Set(p.target);
   const before = [], after = [];
   let clicks = 0, fixed = 0;
+
+  // 布局 C（2025-10 新版章节测验 div.TiMu）：没有 span.num_option，选项是 ul.Zy_ulTop > li > i(字母)
+  if (!spans.length) {
+    const lis = [...node.querySelectorAll('ul.Zy_ulTop li, ul.qtDetail li')];
+    if (!lis.length) return { qid: p.qid, err: 'no options' };
+    const isSel = li => /(^|\\s)(check_answer|check_answer_dx|cur|active|selected|checked)(\\s|$)/.test(li.className || '')
+      || !!(li.querySelector('i') && /(check_answer|cur|active|selected|checked)/.test(li.querySelector('i').className || ''))
+      || li.getAttribute('aria-selected') === 'true';
+    const labelOf = li => { const i = li.querySelector('i'); return i ? (i.innerText || '').replace(/[^A-Za-z]/g, '').toUpperCase() : ''; };
+    for (const li of lis) { if (isSel(li)) before.push(labelOf(li)); }
+    for (const li of lis) {
+      const lb = labelOf(li);
+      if (!lb) continue;
+      const want = target.has(lb), has = isSel(li);
+      if (want === has) continue;
+      try {
+        li.click();
+        const a = li.querySelector('a');
+        if (a) a.click();
+        if (want) clicks++;
+        await wait(320);
+      } catch (e) {}
+    }
+    await wait(300);
+    for (const li of lis) { if (isSel(li)) after.push(labelOf(li)); }
+    const inp0 = document.getElementById('answer' + p.qid);
+    return {
+      qid: p.qid, type: p.type, want: p.target, before, after, clicks, fixed,
+      val: inp0 ? inp0.value : null, layout: 'newTiMu',
+      selByClass: after.slice(),
+    };
+  }
+
   for (const s of spans) {
     const d = s.getAttribute('data');
     if (s.classList.contains(cls)) before.push(d);
@@ -146,7 +180,7 @@ async function applyAnswers(cdp, questions, answers, cfg, log, ctxId) {
     const p = choice[i];
     let r = null;
     try {
-      r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctx, timeoutMs: 20000 });
+      r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctx, timeoutMs: 40000, awaitPromise: true });
     } catch (e) {
       if (/context/i.test(e.message)) {
         const nc = await relocalCtx(cdp, p.qid);
@@ -154,7 +188,7 @@ async function applyAnswers(cdp, questions, answers, cfg, log, ctxId) {
           log.warn(`页面已重渲染，上下文 ${ctx} → ${nc}，重试 qid=${p.qid}`);
           ctx = nc;
           try {
-            r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctx, timeoutMs: 20000 });
+            r = await cdp.evaluate(`(${APPLY_ONE_FN})(${JSON.stringify(p)})`, { contextId: ctx, timeoutMs: 40000, awaitPromise: true });
           } catch (e2) { bad++; log.err(`qid=${p.qid} 重试失败: ${e2.message}`); continue; }
         } else {
           bad++; log.err(`qid=${p.qid} 上下文丢失且无法重定位`); continue;
@@ -218,6 +252,12 @@ async function saveDraft(cdp, log, ctxId) {
       if (typeof saveWork === 'function') { saveWork(); return 'saveWork()' }
       const b = document.querySelector('a.btnSave, #tempsave');
       if (b) { b.click(); return 'click .btnSave' }
+      // 布局 C（新版章节测验）：按钮是视觉按钮，文字「暂时保存」
+      const cands = [...document.querySelectorAll('a,button,span,div')].filter(e => {
+        const t = (e.innerText || '').trim();
+        return t === '暂时保存' && e.offsetParent && !e.querySelector('a,button');
+      });
+      if (cands.length) { cands[0].click(); return 'click 暂时保存' }
       return 'no save control'
     } catch (e) { return 'err:' + e.message }
   })()`, { contextId: ctxId, timeoutMs: 15000 });
@@ -234,6 +274,16 @@ async function submitNow(cdp, log, ctxId) {
       const b = document.querySelector('a.btnSubmit');
       if (b) { b.click(); return 'click .btnSubmit' }
       if (typeof btnBlueSubmit === 'function') { btnBlueSubmit(); return 'btnBlueSubmit()' }
+      // 布局 C（新版章节测验）：文字按钮「提交」，排除「暂时保存」「提交作业」以外的干扰
+      const cands = [...document.querySelectorAll('a,button,span,div')].filter(e => {
+        const t = (e.innerText || '').trim();
+        if (t !== '提交' && t !== '交卷') return false;
+        if (!e.offsetParent) return false;
+        if (e.querySelector('a,button')) return false;
+        const b2 = e.getBoundingClientRect();
+        return b2.width > 10 && b2.height > 10;
+      });
+      if (cands.length) { cands[0].click(); return 'click 提交' }
       return 'no submit control'
     } catch (e) { return 'err:' + e.message }
   })()`, { contextId: ctxId, timeoutMs: 15000 });
@@ -281,7 +331,17 @@ async function verify(cdp, questions, answers, log, ctxId) {
         return { qid: p.qid, kind:'fill', got: p.answers.map((_,i)=>{const e=document.getElementById('answerEditor'+p.qid+(i+1));return e?e.value:null}) };
       }
       const e = document.getElementById('answer'+p.qid);
-      return { qid: p.qid, kind:'choice', got: e ? e.value : null };
+      if (e) return { qid: p.qid, kind:'choice', got: e.value };
+      // 布局 C 没有隐藏 input：#answer{qid} → 从选中的 li 里反解字母
+      const node = document.getElementById('question' + p.qid);
+      if (node) {
+        const lis = [...node.querySelectorAll('ul.Zy_ulTop li, ul.qtDetail li')];
+        const sel = lis.filter(li => /(^|\\s)(check_answer|check_answer_dx|cur|active|selected|checked)(\\s|$)/.test(li.className || ''))
+          .map(li => { const i = li.querySelector('i'); return i ? (i.innerText || '').replace(/[^A-Za-z]/g, '').toUpperCase() : ''; })
+          .filter(Boolean).sort().join('');
+        return { qid: p.qid, kind:'choice', got: sel, layout: 'newTiMu' };
+      }
+      return { qid: p.qid, kind:'choice', got: null };
     });
   })(${JSON.stringify(plan)})`, { contextId: ctxId });
 
